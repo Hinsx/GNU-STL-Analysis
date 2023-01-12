@@ -164,6 +164,85 @@ typedef __gnu_cxx::__alloc_traits<_Tp_alloc_type>	_Alloc_traits;
 //...   
 }
 ```
+首先关注几个私有函数
+```C++
+private:
+#if __cplusplus >= 201103L
+      static constexpr bool
+      _S_nothrow_relocate(true_type)
+{
+      return noexcept(std::__relocate_a(std::declval<pointer>(),
+                                    std::declval<pointer>(),
+                                    std::declval<pointer>(),
+                                    std::declval<_Tp_alloc_type&>()));
+}
+
+static constexpr bool
+_S_nothrow_relocate(false_type)
+{ return false; }
+
+static constexpr bool
+_S_use_relocate()
+{
+// Instantiating std::__relocate_a might cause an error outside the
+// immediate context (in __relocate_object_a's noexcept-specifier),
+// so only do it if we know the type can be move-inserted into *this.
+return _S_nothrow_relocate(__is_move_insertable<_Tp_alloc_type>{});
+}
+```
+`_S_use_relocate()`可用于判断`std::__relocate_a`是否会抛出异常。
+`std::__relocate_a`函数用于在给定迭代器范围内，通过`Alloc`的`construct`函数对`Tp`类型进行`移动构造`，从而**将数据从旧的内存地址移动到新的内存地址**。
+观察`_S_use_relocate()`函数体，其中使用到了`__is_move_insertable<>`,若参数不满足*MoveIsertable*，则具现化为`false_type`
+```
+[cppreference.com](https://en.cppreference.com/w/cpp/named_req/MoveInsertable)
+
+MoveInsertable (since C++11)
+Specifies that an object of the type can be constructed into uninitialized storage from an rvalue of that type by a given allocator.
+```
+当不满足这个条件时，使用`std::__relocate_a`执行移动构造可能会出现错误。所以`_S_use_relocate()`返回`false`（即可能会抛出异常）
+如果满足MoveInsertable，还需要判断`__relocate_a`内部的调用是否会抛出异常。
+```C++
+static constexpr bool
+_S_nothrow_relocate(true_type)
+{
+      return noexcept(std::__relocate_a(
+      std::declval<pointer>(),
+      std::declval<pointer>(),
+      std::declval<pointer>(),
+      std::declval<_Tp_alloc_type&>()));
+}
+```
+`__relocate_a`的实现位于`stl_uninitialized.h`。待日后分析此头文件时再详细剖析。目前仅需要知道
+
+1. 若`Tp`是`trival`类型，且`Alloc`是默认的`allocator`，则不会抛出异常
+2. 否则，需要根据`Alloc`的`construct`是否会抛出异常来决定(若`Alloc`没有实现`construct`，则根据`std::is_nothrow_constructible<_Tp, _Args...>::value`决定是否抛出异常)
+
+\
+继续分析
+```C++
+static pointer
+      _S_do_relocate(pointer __first, pointer __last, pointer __result,
+		     _Tp_alloc_type& __alloc, true_type) noexcept
+      {
+	return std::__relocate_a(__first, __last, __result, __alloc);
+      }
+
+      static pointer
+      _S_do_relocate(pointer, pointer, pointer __result,
+		     _Tp_alloc_type&, false_type) noexcept
+      { return __result; }
+
+      static pointer
+      _S_relocate(pointer __first, pointer __last, pointer __result,
+		  _Tp_alloc_type& __alloc) noexcept
+      {
+	using __do_it = __bool_constant<_S_use_relocate()>;
+	return _S_do_relocate(__first, __last, __result, __alloc, __do_it{});
+      }
+```
+`_S_relocate`使用`__bool_constant<_S_use_relocate()>;`决定函数的重载版本。
+
+
 现在分析部分常见函数
 ```C++
 /**
@@ -709,7 +788,7 @@ protected:
       push_back(value_type&& __x)
       { emplace_back(std::move(__x)); }
 ```
-观察`_M_realloc_insert`，其定义位于`vector.tcc`，其作用是在vector`[start,finish)`范围的某下表`position`处插入元素时，执行扩容。基本逻辑是
+观察`_M_realloc_insert`，其定义位于`vector.tcc`，其作用是在vector`[start,finish)`范围的某下标`position`处插入元素时，执行扩容。基本逻辑是
 
 1. 决定扩容后的vector总长度
 2. 重新分配内存
@@ -813,3 +892,8 @@ protected:
 	return (__len < size() || __len > max_size()) ? max_size() : __len;
       }
 ```
+在构造左右部分的对象时，有如下判断语句
+```C++
+if _GLIBCXX17_CONSTEXPR (_S_use_relocate())
+```
+`_S_use_relocate()`用于判断`Tp`类型是否可由`Alloc`的`construct`函数进行`移动`构造
