@@ -792,7 +792,7 @@ protected:
 
 1. 决定扩容后的vector总长度
 2. 重新分配内存
-3. 在内存上构造对象，首先构造`position`处（即插入的值），然后依次（移动）构造左部分和右部分的元素。
+3. 在内存上构造对象，首先构造`position`处（即插入的值），然后依次移动构造`position`左部分和右部分的元素。（数据从旧地址搬运到新地址）
 4. 析构原内存空间的元素，并释放旧内存
 5. 调整vector的指针，指向新内存。
 ```C++
@@ -892,8 +892,29 @@ protected:
 	return (__len < size() || __len > max_size()) ? max_size() : __len;
       }
 ```
+因为传入的`__n`其值为1，实际上`__len=2*size()`，**所以`push_back`造成的扩容是按照两倍扩容的**
+\
 在构造左右部分的对象时，有如下判断语句
 ```C++
 if _GLIBCXX17_CONSTEXPR (_S_use_relocate())
 ```
-`_S_use_relocate()`用于判断`Tp`类型是否可由`Alloc`的`construct`函数进行`移动`构造
+`_S_use_relocate()`用于判断`_S_relocate()`类型是否能执行，否则使用`std::__uninitialized_move_if_noexcept_a`，此模板函数定义位于`stl_intialized.h`，若构造过程中出现异常，则会首先析构以及构造的对象，再抛出异常。
+\
+注意到整个构造过程处于`__try`代码块中，在`__catch`中执行析构。有四种情况
+
+1. 没有任何元素构建成功。此时`__new_finish = pointer();`不会执行，因为在构建`position`处的对象时就抛出异常了，此时`__new_finish!=0`,执行else块，但因为`__new_finish==__new_star`，所以最终没有执行析构
+2. 只构建了`position`,意味着在构建左部分时抛出了异常，此时`__new_finish = pointer();`已经执行，所以执行if代码块，析构`postion`处即可。
+3. 只构建了`postion`和左部分，此时`__new_finish`已经不等于0，所以执行else代码块，因为右部分在抛出异常前已经析构，所以仅需要析构`[__new_start,__new_finish)`，即`position`及其左部分
+4. 全部构建，此时不会抛出异常，不需要catch处理。
+
+继续观察逻辑，在构建成功后，需要对旧地址元素执行析构，因为`_S_relocate`会执行这一步，为了提高效率避免重复析构，需要进行判断
+```C++
+//4
+#if __cplusplus >= 201103L
+      if _GLIBCXX17_CONSTEXPR (!_S_use_relocate())
+#endif
+	std::_Destroy(__old_start, __old_finish, _M_get_Tp_allocator());
+      _GLIBCXX_ASAN_ANNOTATE_REINIT;
+```
+这之后就是释放旧内存空间，调整vector的指针。
+
