@@ -214,7 +214,7 @@ _S_nothrow_relocate(true_type)
 ```
 `__relocate_a`的实现位于`stl_uninitialized.h`。待日后分析此头文件时再详细剖析。目前仅需要知道
 
-1. 若`Tp`是`trival`类型，且`Alloc`是默认的`allocator`，则不会抛出异常
+1. 若`Tp`是`trival`类别，且`Alloc`是默认的`allocator`，则不会抛出异常
 2. 否则，需要根据`Alloc`的`construct`是否会抛出异常来决定(若`Alloc`没有实现`construct`，则根据`std::is_nothrow_constructible<_Tp, _Args...>::value`决定是否抛出异常)
 
 \
